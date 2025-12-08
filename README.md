@@ -71,6 +71,7 @@ web: gunicorn room_availability_service:app
 4. Railway will auto-detect Flask and deploy
 5. Add these environment variables:
    - `TIMEZONE` (optional, defaults to America/Chicago)
+   - `USE_PROXY_FOR_ICS` (optional, defaults to `true`). Set to `false` if your hosting platform injects HTTP(S) proxy settings that block Outlook/Google calendar downloads.
 
 #### Option C: Self-Host on Your Server
 
@@ -130,6 +131,11 @@ sudo systemctl status room-display
 Test the endpoint:
 ```bash
 curl "http://your-server:5000/room-status?ics_url=YOUR_ICS_URL&room_name=Conference%20Room%201"
+```
+
+If you need to inspect how the service expands recurring events, call the debug endpoint. You can optionally pass `days=N` (1–30) to see a wider date range (useful when there are no meetings today):
+```bash
+curl "http://your-server:5000/debug?ics_url=YOUR_ICS_URL&days=7"
 ```
 
 You should get JSON like:

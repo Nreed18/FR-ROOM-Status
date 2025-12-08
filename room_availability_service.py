@@ -19,12 +19,18 @@ app = Flask(__name__)
 # Configuration - can be overridden by environment variable
 TIMEZONE_STR = os.environ.get('TIMEZONE', 'America/Chicago')
 TIMEZONE = pytz.timezone(TIMEZONE_STR)
+USE_PROXY_FOR_ICS = os.environ.get('USE_PROXY_FOR_ICS', 'true').lower() not in ('false', '0', 'no')
 
 
 def fetch_ics_feed(ics_url: str) -> Calendar:
     """Fetch and parse ICS calendar from URL"""
     try:
-        response = requests.get(ics_url, timeout=10)
+        if USE_PROXY_FOR_ICS:
+            response = requests.get(ics_url, timeout=10)
+        else:
+            session = requests.Session()
+            session.trust_env = False  # Ignore http/https proxy env vars that can block the feed
+            response = session.get(ics_url, timeout=10)
         response.raise_for_status()
         cal = Calendar.from_ical(response.content)
         return cal
@@ -32,26 +38,28 @@ def fetch_ics_feed(ics_url: str) -> Calendar:
         raise Exception(f"Failed to fetch ICS feed: {str(e)}")
 
 
-def parse_events_with_recurrence(cal: Calendar, now: datetime) -> List[Dict]:
+def parse_events_with_recurrence(
+    cal: Calendar, now: datetime, start_date: Optional[date] = None, end_date: Optional[date] = None
+) -> List[Dict]:
     """
     Parse calendar events including recurring events
     Uses recurring-ical-events to expand RRULE entries
+
+    start_date/end_date allow callers (e.g., /debug) to inspect a wider range of days
+    instead of just the current date. Dates are inclusive.
     """
     events = []
-    
-    # Get today's date range in local timezone
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-    
-    # Use recurring-ical-events to expand recurring events for today
-    # This handles RRULE, EXDATE, and RECURRENCE-ID automatically
-    start_date = today_start.date()
-    end_date = today_end.date()
-    
+
+    # Compute the date range in local timezone
+    start_date = start_date or now.date()
+    end_date = end_date or start_date
+    range_start = TIMEZONE.localize(datetime.combine(start_date, datetime.min.time()))
+    range_end = TIMEZONE.localize(datetime.combine(end_date, datetime.max.time()))
+
     try:
-        # Get all events occurring today (including recurring event instances)
+        # Get all events occurring in the requested range (including recurring instances)
         events_today = recurring_ical_events.of(cal).between(start_date, end_date)
-        
+
         for component in events_today:
             try:
                 # Get event details
@@ -77,8 +85,8 @@ def parse_events_with_recurrence(cal: Calendar, now: datetime) -> List[Dict]:
                 start = start.astimezone(TIMEZONE)
                 end = end.astimezone(TIMEZONE)
                 
-                # Only include events that actually occur today
-                if start.date() == today_start.date() or end.date() == today_start.date():
+                # Only include events that overlap the requested date range
+                if start <= range_end and end >= range_start:
                     events.append({
                         'summary': summary,
                         'start': start,
@@ -92,7 +100,7 @@ def parse_events_with_recurrence(cal: Calendar, now: datetime) -> List[Dict]:
     except Exception as e:
         app.logger.error(f"Error expanding recurring events: {str(e)}")
         # Fallback to old method if recurring expansion fails
-        return parse_events_fallback(cal, now)
+        return parse_events_fallback(cal, now, start_date=start_date, end_date=end_date)
     
     # Sort by start time
     events.sort(key=lambda x: x['start'])
@@ -104,15 +112,19 @@ def parse_events_with_recurrence(cal: Calendar, now: datetime) -> List[Dict]:
     return events
 
 
-def parse_events_fallback(cal: Calendar, now: datetime) -> List[Dict]:
+def parse_events_fallback(
+    cal: Calendar, now: datetime, start_date: Optional[date] = None, end_date: Optional[date] = None
+) -> List[Dict]:
     """
     Fallback parser without recurring event support
     Used if recurring-ical-events fails
     """
     events = []
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-    
+    start_date = start_date or now.date()
+    end_date = end_date or start_date
+    date_range_start = TIMEZONE.localize(datetime.combine(start_date, datetime.min.time()))
+    date_range_end = TIMEZONE.localize(datetime.combine(end_date, datetime.max.time()))
+
     for component in cal.walk('VEVENT'):
         try:
             # Skip recurring events (they won't work in fallback mode)
@@ -138,7 +150,7 @@ def parse_events_fallback(cal: Calendar, now: datetime) -> List[Dict]:
             start = start.astimezone(TIMEZONE)
             end = end.astimezone(TIMEZONE)
             
-            if start <= today_end and end >= today_start:
+            if start <= date_range_end and end >= date_range_start:
                 events.append({
                     'summary': summary,
                     'start': start,
@@ -238,20 +250,31 @@ def debug():
     ics_url = request.args.get('ics_url')
     if not ics_url:
         return jsonify({'error': 'ics_url parameter required'}), 400
-    
+
     try:
         now = datetime.now(TIMEZONE)
+        days = request.args.get('days', default='1')
+        try:
+            days_int = max(1, min(int(days), 30))  # Clamp between 1 and 30 days
+        except ValueError:
+            return jsonify({'error': 'days must be an integer'}), 400
+
+        start_date = now.date()
+        end_date = start_date + timedelta(days=days_int - 1)
+
         cal = fetch_ics_feed(ics_url)
-        events = parse_events_with_recurrence(cal, now)
-        
+        events = parse_events_with_recurrence(cal, now, start_date=start_date, end_date=end_date)
+
         debug_info = {
             'current_time': now.isoformat(),
             'current_time_display': now.strftime('%-I:%M %p'),
             'timezone': str(TIMEZONE),
+            'range_start': start_date.isoformat(),
+            'range_end': end_date.isoformat(),
             'events': []
         }
-        
-        for event in events[:10]:  # Show first 10 events
+
+        for event in events[:20]:  # Show first 20 events in range
             debug_info['events'].append({
                 'summary': event['summary'],
                 'start_iso': event['start'].isoformat(),
@@ -262,7 +285,7 @@ def debug():
                 'is_future': event['start'] > now,
                 'minutes_until': int((event['start'] - now).total_seconds() / 60)
             })
-        
+
         return jsonify(debug_info)
     except Exception as e:
         app.logger.error(f"Debug error: {str(e)}", exc_info=True)
