@@ -2,19 +2,23 @@
 """
 Room Availability Service for TRMNL E-ink Display
 Parses ICS calendar feeds and returns current room status
+Now with support for recurring events (RRULE)!
 """
 
 from flask import Flask, jsonify, request
 from icalendar import Calendar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pytz
 import requests
 from typing import List, Dict, Optional
+import recurring_ical_events
+import os
 
 app = Flask(__name__)
 
-# Configuration - set your timezone
-TIMEZONE = pytz.timezone('America/Chicago')  # Adjust for your location
+# Configuration - can be overridden by environment variable
+TIMEZONE_STR = os.environ.get('TIMEZONE', 'America/Chicago')
+TIMEZONE = pytz.timezone(TIMEZONE_STR)
 
 
 def fetch_ics_feed(ics_url: str) -> Calendar:
@@ -28,41 +32,112 @@ def fetch_ics_feed(ics_url: str) -> Calendar:
         raise Exception(f"Failed to fetch ICS feed: {str(e)}")
 
 
-def parse_events(cal: Calendar, now: datetime) -> List[Dict]:
-    """Parse calendar events and return relevant booking information"""
+def parse_events_with_recurrence(cal: Calendar, now: datetime) -> List[Dict]:
+    """
+    Parse calendar events including recurring events
+    Uses recurring-ical-events to expand RRULE entries
+    """
     events = []
     
     # Get today's date range in local timezone
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
     
+    # Use recurring-ical-events to expand recurring events for today
+    # This handles RRULE, EXDATE, and RECURRENCE-ID automatically
+    start_date = today_start.date()
+    end_date = today_end.date()
+    
+    try:
+        # Get all events occurring today (including recurring event instances)
+        events_today = recurring_ical_events.of(cal).between(start_date, end_date)
+        
+        for component in events_today:
+            try:
+                # Get event details
+                summary = str(component.get('SUMMARY', 'Booking'))
+                start = component.get('DTSTART').dt
+                end = component.get('DTEND').dt
+                
+                # Convert to datetime if date only
+                if isinstance(start, date) and not isinstance(start, datetime):
+                    start = datetime.combine(start, datetime.min.time())
+                    start = TIMEZONE.localize(start)
+                if isinstance(end, date) and not isinstance(end, datetime):
+                    end = datetime.combine(end, datetime.max.time())
+                    end = TIMEZONE.localize(end)
+                
+                # Ensure timezone aware
+                if start.tzinfo is None:
+                    start = TIMEZONE.localize(start)
+                if end.tzinfo is None:
+                    end = TIMEZONE.localize(end)
+                
+                # Convert to local timezone
+                start = start.astimezone(TIMEZONE)
+                end = end.astimezone(TIMEZONE)
+                
+                # Only include events that actually occur today
+                if start.date() == today_start.date() or end.date() == today_start.date():
+                    events.append({
+                        'summary': summary,
+                        'start': start,
+                        'end': end,
+                        'organizer': str(component.get('ORGANIZER', '')).replace('mailto:', '')
+                    })
+            except Exception as e:
+                # Skip problematic events
+                app.logger.warning(f"Error parsing event: {str(e)}")
+                continue
+    except Exception as e:
+        app.logger.error(f"Error expanding recurring events: {str(e)}")
+        # Fallback to old method if recurring expansion fails
+        return parse_events_fallback(cal, now)
+    
+    # Sort by start time
+    events.sort(key=lambda x: x['start'])
+    
+    app.logger.info(f"Found {len(events)} events for today")
+    for event in events:
+        app.logger.info(f"  - {event['summary']}: {event['start'].strftime('%I:%M %p')} - {event['end'].strftime('%I:%M %p')}")
+    
+    return events
+
+
+def parse_events_fallback(cal: Calendar, now: datetime) -> List[Dict]:
+    """
+    Fallback parser without recurring event support
+    Used if recurring-ical-events fails
+    """
+    events = []
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
     for component in cal.walk('VEVENT'):
         try:
-            # Get event details
+            # Skip recurring events (they won't work in fallback mode)
+            if component.get('RRULE'):
+                continue
+                
             summary = str(component.get('SUMMARY', 'Booking'))
             start = component.get('DTSTART').dt
             end = component.get('DTEND').dt
             
-            # Convert to datetime if date only
-            if not isinstance(start, datetime):
+            if isinstance(start, date) and not isinstance(start, datetime):
                 start = datetime.combine(start, datetime.min.time())
                 start = TIMEZONE.localize(start)
-            if not isinstance(end, datetime):
+            if isinstance(end, date) and not isinstance(end, datetime):
                 end = datetime.combine(end, datetime.max.time())
                 end = TIMEZONE.localize(end)
             
-            # Ensure timezone aware
             if start.tzinfo is None:
                 start = TIMEZONE.localize(start)
             if end.tzinfo is None:
                 end = TIMEZONE.localize(end)
             
-            # Convert to local timezone
             start = start.astimezone(TIMEZONE)
             end = end.astimezone(TIMEZONE)
             
-            # Only include events that start or overlap with today
-            # Event must start before end of today and end after start of today
             if start <= today_end and end >= today_start:
                 events.append({
                     'summary': summary,
@@ -71,10 +146,8 @@ def parse_events(cal: Calendar, now: datetime) -> List[Dict]:
                     'organizer': str(component.get('ORGANIZER', '')).replace('mailto:', '')
                 })
         except Exception as e:
-            # Skip problematic events
             continue
     
-    # Sort by start time
     events.sort(key=lambda x: x['start'])
     return events
 
@@ -99,40 +172,46 @@ def determine_room_status(events: List[Dict], now: datetime) -> Dict:
             next_event = event
             break
     
+    # Determine status
     if current_event:
-        # Room is occupied
+        # Room is currently occupied
+        minutes_until_free = int((current_event['end'] - now).total_seconds() / 60)
         return {
             'status': 'OCCUPIED',
             'status_text': 'OCCUPIED',
+            'available_until': None,
+            'minutes_available': None,
             'current_booking': {
                 'title': current_event['summary'],
-                'organizer': current_event['organizer'],
                 'start_time': current_event['start'].strftime('%-I:%M %p'),
                 'end_time': current_event['end'].strftime('%-I:%M %p'),
-                'minutes_remaining': int((current_event['end'] - now).total_seconds() / 60)
+                'organizer': current_event['organizer']
             },
-            'available_until': None,
-            'next_booking': next_event
+            'next_booking': {
+                'title': next_event['summary'],
+                'start_time': next_event['start'].strftime('%-I:%M %p'),
+                'end_time': next_event['end'].strftime('%-I:%M %p'),
+                'organizer': next_event['organizer']
+            } if next_event else None
         }
     elif next_event:
-        # Room is available until next booking
-        minutes_until = int((next_event['start'] - now).total_seconds() / 60)
-        
+        # Room is available until next meeting
+        minutes_until_next = int((next_event['start'] - now).total_seconds() / 60)
         return {
             'status': 'AVAILABLE',
-            'status_text': f"AVAILABLE",
+            'status_text': 'AVAILABLE',
             'available_until': next_event['start'].strftime('%-I:%M %p'),
-            'minutes_available': minutes_until,
+            'minutes_available': minutes_until_next,
             'current_booking': None,
             'next_booking': {
                 'title': next_event['summary'],
-                'organizer': next_event['organizer'],
                 'start_time': next_event['start'].strftime('%-I:%M %p'),
-                'end_time': next_event['end'].strftime('%-I:%M %p')
+                'end_time': next_event['end'].strftime('%-I:%M %p'),
+                'organizer': next_event['organizer']
             }
         }
     else:
-        # No more bookings today
+        # Room is available for rest of day
         return {
             'status': 'AVAILABLE',
             'status_text': 'AVAILABLE',
@@ -141,6 +220,53 @@ def determine_room_status(events: List[Dict], now: datetime) -> Dict:
             'current_booking': None,
             'next_booking': None
         }
+
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'ok',
+        'timezone': str(TIMEZONE),
+        'timestamp': datetime.now(TIMEZONE).isoformat()
+    })
+
+
+@app.route('/debug')
+def debug():
+    """Debug endpoint to see parsed events"""
+    ics_url = request.args.get('ics_url')
+    if not ics_url:
+        return jsonify({'error': 'ics_url parameter required'}), 400
+    
+    try:
+        now = datetime.now(TIMEZONE)
+        cal = fetch_ics_feed(ics_url)
+        events = parse_events_with_recurrence(cal, now)
+        
+        debug_info = {
+            'current_time': now.isoformat(),
+            'current_time_display': now.strftime('%-I:%M %p'),
+            'timezone': str(TIMEZONE),
+            'events': []
+        }
+        
+        for event in events[:10]:  # Show first 10 events
+            debug_info['events'].append({
+                'summary': event['summary'],
+                'start_iso': event['start'].isoformat(),
+                'start_display': event['start'].strftime('%Y-%m-%d %-I:%M %p'),
+                'end_iso': event['end'].isoformat(),
+                'end_display': event['end'].strftime('%Y-%m-%d %-I:%M %p'),
+                'is_current': event['start'] <= now < event['end'],
+                'is_future': event['start'] > now,
+                'minutes_until': int((event['start'] - now).total_seconds() / 60)
+            })
+        
+        return jsonify(debug_info)
+    except Exception as e:
+        app.logger.error(f"Debug error: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/room-status')
@@ -164,13 +290,7 @@ def room_status():
         
         # Fetch and parse calendar
         cal = fetch_ics_feed(ics_url)
-        events = parse_events(cal, now)
-        
-        # Debug logging
-        app.logger.info(f"Current time: {now}")
-        app.logger.info(f"Found {len(events)} events")
-        for i, event in enumerate(events[:3]):  # Log first 3 events
-            app.logger.info(f"Event {i}: {event['summary']} - {event['start']} to {event['end']}")
+        events = parse_events_with_recurrence(cal, now)
         
         # Determine room status
         status = determine_room_status(events, now)
@@ -201,48 +321,6 @@ def room_status():
         }), 500
 
 
-@app.route('/debug')
-def debug():
-    """Debug endpoint to see parsed events"""
-    ics_url = request.args.get('ics_url')
-    if not ics_url:
-        return jsonify({'error': 'ics_url parameter required'}), 400
-    
-    try:
-        now = datetime.now(TIMEZONE)
-        cal = fetch_ics_feed(ics_url)
-        events = parse_events(cal, now)
-        
-        debug_info = {
-            'current_time': now.isoformat(),
-            'current_time_display': now.strftime('%-I:%M %p'),
-            'timezone': str(TIMEZONE),
-            'events': []
-        }
-        
-        for event in events[:5]:  # Show first 5 events
-            debug_info['events'].append({
-                'summary': event['summary'],
-                'start_iso': event['start'].isoformat(),
-                'start_display': event['start'].strftime('%Y-%m-%d %-I:%M %p'),
-                'end_iso': event['end'].isoformat(),
-                'end_display': event['end'].strftime('%Y-%m-%d %-I:%M %p'),
-                'is_current': event['start'] <= now < event['end'],
-                'is_future': event['start'] > now,
-                'minutes_until': int((event['start'] - now).total_seconds() / 60)
-            })
-        
-        return jsonify(debug_info)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'ok', 'timestamp': datetime.now(TIMEZONE).isoformat()})
-
-
 if __name__ == '__main__':
-    # For development
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
