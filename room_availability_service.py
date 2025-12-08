@@ -58,7 +58,8 @@ def parse_events_with_recurrence(
 
     try:
         # Get all events occurring in the requested range (including recurring instances)
-        events_today = recurring_ical_events.of(cal).between(start_date, end_date)
+        # Use timezone-aware datetimes so recurrence expansion respects hours/minutes
+        events_today = recurring_ical_events.of(cal).between(range_start, range_end)
 
         for component in events_today:
             try:
