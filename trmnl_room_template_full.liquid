@@ -1,0 +1,123 @@
+{%- comment -%}
+Room Availability Display Template for TRMNL
+This is the Liquid markup for your TRMNL Private Plugin
+{%- endcomment -%}
+
+<div class="frame frame--full" style="display: flex; flex-direction: column; justify-content: space-between; padding: 40px;">
+  
+  {%- comment -%} Header with Room Name and Date/Time {%- endcomment -%}
+  <div style="border-bottom: 3px solid #000; padding-bottom: 20px; margin-bottom: 30px;">
+    <div style="display: flex; justify-content: space-between; align-items: baseline;">
+      <h1 style="font-size: 48px; font-weight: bold; margin: 0;">
+        {{ IDX_0.room_name | default: "Conference Room" }}
+      </h1>
+      <div style="text-align: right;">
+        <div style="font-size: 24px; font-weight: 600;">{{ IDX_0.current_date }}</div>
+        <div style="font-size: 32px; font-weight: bold; margin-top: 8px;">{{ IDX_0.current_time }}</div>
+      </div>
+    </div>
+  </div>
+
+  {%- comment -%} Main Status Display {%- endcomment -%}
+  <div style="flex: 1; display: flex; flex-direction: column; justify-content: center;">
+    
+    {% if IDX_0.status == "AVAILABLE" %}
+      {%- comment -%} AVAILABLE STATUS {%- endcomment -%}
+      <div style="background: #000; color: #fff; padding: 60px; text-align: center; border-radius: 12px;">
+        <div style="font-size: 96px; font-weight: bold; letter-spacing: 4px; margin-bottom: 20px;">
+          AVAILABLE
+        </div>
+        {% if IDX_0.available_until %}
+          <div style="font-size: 48px; font-weight: 600;">
+            UNTIL {{ IDX_0.available_until }}
+          </div>
+        {% endif %}
+      </div>
+
+      {%- comment -%} Next Booking Info {%- endcomment -%}
+      {% if IDX_0.next_booking %}
+        <div style="margin-top: 40px; padding: 30px; border: 3px solid #000; border-radius: 8px;">
+          <div style="font-size: 28px; font-weight: bold; margin-bottom: 15px;">NEXT BOOKING:</div>
+          <div style="font-size: 36px; font-weight: 600; margin-bottom: 10px;">
+            {{ IDX_0.next_booking.title }}
+          </div>
+          <div style="font-size: 32px; color: #555;">
+            {{ IDX_0.next_booking.start_time }} - {{ IDX_0.next_booking.end_time }}
+          </div>
+          {% if IDX_0.next_booking.organizer %}
+            <div style="font-size: 24px; color: #777; margin-top: 10px;">
+              Organizer: {{ IDX_0.next_booking.organizer }}
+            </div>
+          {% endif %}
+        </div>
+      {% else %}
+        <div style="margin-top: 40px; text-align: center;">
+          <div style="font-size: 32px; color: #666;">
+            No more bookings today
+          </div>
+        </div>
+      {% endif %}
+
+    {% elsif IDX_0.status == "OCCUPIED" %}
+      {%- comment -%} OCCUPIED STATUS {%- endcomment -%}
+      <div style="background: #333; color: #fff; padding: 60px; text-align: center; border-radius: 12px;">
+        <div style="font-size: 96px; font-weight: bold; letter-spacing: 4px; margin-bottom: 20px;">
+          OCCUPIED
+        </div>
+        {% if IDX_0.current_booking.end_time %}
+          <div style="font-size: 48px; font-weight: 600;">
+            UNTIL {{ IDX_0.current_booking.end_time }}
+          </div>
+        {% endif %}
+      </div>
+
+      {%- comment -%} Current Booking Details {%- endcomment -%}
+      {% if IDX_0.current_booking %}
+        <div style="margin-top: 40px; padding: 30px; border: 3px solid #333; border-radius: 8px;">
+          <div style="font-size: 28px; font-weight: bold; margin-bottom: 15px;">CURRENT MEETING:</div>
+          <div style="font-size: 36px; font-weight: 600; margin-bottom: 10px;">
+            {{ IDX_0.current_booking.title }}
+          </div>
+          <div style="font-size: 32px; color: #555;">
+            {{ IDX_0.current_booking.start_time }} - {{ IDX_0.current_booking.end_time }}
+          </div>
+          {% if IDX_0.current_booking.organizer %}
+            <div style="font-size: 24px; color: #777; margin-top: 10px;">
+              Organizer: {{ IDX_0.current_booking.organizer }}
+            </div>
+          {% endif %}
+          {% if IDX_0.current_booking.minutes_remaining %}
+            <div style="font-size: 28px; margin-top: 15px; font-weight: 600; color: #d00;">
+              {{ IDX_0.current_booking.minutes_remaining }} minutes remaining
+            </div>
+          {% endif %}
+        </div>
+      {% endif %}
+
+    {% else %}
+      {%- comment -%} ERROR STATUS {%- endcomment -%}
+      <div style="padding: 60px; text-align: center; border: 3px solid #d00; border-radius: 12px;">
+        <div style="font-size: 72px; font-weight: bold; color: #d00; margin-bottom: 20px;">
+          STATUS UNAVAILABLE
+        </div>
+        <div style="font-size: 32px; color: #666;">
+          Please check system connection
+        </div>
+      </div>
+    {% endif %}
+
+  </div>
+
+  {%- comment -%} Footer {%- endcomment -%}
+  <div style="border-top: 2px solid #ccc; padding-top: 15px; margin-top: 30px;">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <div style="font-size: 18px; color: #999;">
+        Last updated: {{ IDX_0.current_time }}
+      </div>
+      <div style="font-size: 18px; color: #999;">
+        Powered by TRMNL
+      </div>
+    </div>
+  </div>
+
+</div>

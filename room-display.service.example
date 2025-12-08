@@ -1,0 +1,65 @@
+# Systemd service file for Room Availability Service
+# Save this as /etc/systemd/system/room-display.service
+
+[Unit]
+Description=Room Availability Display Service for TRMNL
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/room-display
+Environment="PATH=/opt/room-display/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="TIMEZONE=America/Chicago"
+
+# Use virtual environment
+ExecStart=/opt/room-display/venv/bin/gunicorn \
+    --bind 0.0.0.0:5000 \
+    --workers 2 \
+    --timeout 60 \
+    --access-logfile /var/log/room-display/access.log \
+    --error-logfile /var/log/room-display/error.log \
+    --log-level info \
+    room_availability_service:app
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=200
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/room-display
+
+# Resource limits
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
+
+# Installation instructions:
+#
+# 1. Copy this file to /etc/systemd/system/room-display.service
+# 2. Create directories:
+#    sudo mkdir -p /opt/room-display /var/log/room-display
+#    sudo chown www-data:www-data /var/log/room-display
+# 3. Copy your application to /opt/room-display
+# 4. Create virtual environment:
+#    cd /opt/room-display
+#    python3 -m venv venv
+#    source venv/bin/activate
+#    pip install -r requirements.txt
+# 5. Enable and start:
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable room-display
+#    sudo systemctl start room-display
+# 6. Check status:
+#    sudo systemctl status room-display
+#    sudo journalctl -u room-display -f

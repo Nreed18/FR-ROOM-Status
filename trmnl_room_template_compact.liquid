@@ -1,0 +1,61 @@
+{%- comment -%}
+Compact Room Availability Template for TRMNL
+Use this for half-screen or quadrant layouts
+{%- endcomment -%}
+
+<div class="frame" style="padding: 20px;">
+  
+  {%- comment -%} Header {%- endcomment -%}
+  <div style="border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 15px;">
+    <h2 style="font-size: 28px; font-weight: bold; margin: 0;">
+      {{ IDX_0.room_name | default: "Room" }}
+    </h2>
+    <div style="font-size: 16px; color: #666; margin-top: 5px;">
+      {{ IDX_0.current_time }}
+    </div>
+  </div>
+
+  {%- comment -%} Status {%- endcomment -%}
+  {% if IDX_0.status == "AVAILABLE" %}
+    <div style="background: #000; color: #fff; padding: 20px; text-align: center; border-radius: 6px; margin-bottom: 15px;">
+      <div style="font-size: 48px; font-weight: bold;">AVAILABLE</div>
+      {% if IDX_0.available_until %}
+        <div style="font-size: 24px; margin-top: 5px;">Until {{ IDX_0.available_until }}</div>
+      {% endif %}
+    </div>
+    
+    {% if IDX_0.next_booking %}
+      <div style="padding: 15px; border: 2px solid #000; border-radius: 4px;">
+        <div style="font-size: 14px; font-weight: bold; margin-bottom: 5px;">NEXT:</div>
+        <div style="font-size: 20px; font-weight: 600;">{{ IDX_0.next_booking.title }}</div>
+        <div style="font-size: 18px; color: #555; margin-top: 5px;">
+          {{ IDX_0.next_booking.start_time }} - {{ IDX_0.next_booking.end_time }}
+        </div>
+      </div>
+    {% endif %}
+
+  {% elsif IDX_0.status == "OCCUPIED" %}
+    <div style="background: #333; color: #fff; padding: 20px; text-align: center; border-radius: 6px; margin-bottom: 15px;">
+      <div style="font-size: 48px; font-weight: bold;">OCCUPIED</div>
+      {% if IDX_0.current_booking.end_time %}
+        <div style="font-size: 24px; margin-top: 5px;">Until {{ IDX_0.current_booking.end_time }}</div>
+      {% endif %}
+    </div>
+    
+    {% if IDX_0.current_booking %}
+      <div style="padding: 15px; border: 2px solid #333; border-radius: 4px;">
+        <div style="font-size: 20px; font-weight: 600;">{{ IDX_0.current_booking.title }}</div>
+        <div style="font-size: 18px; color: #555; margin-top: 5px;">
+          {{ IDX_0.current_booking.start_time }} - {{ IDX_0.current_booking.end_time }}
+        </div>
+      </div>
+    {% endif %}
+
+  {% else %}
+    <div style="padding: 20px; text-align: center; border: 2px solid #d00; border-radius: 6px;">
+      <div style="font-size: 32px; font-weight: bold; color: #d00;">ERROR</div>
+      <div style="font-size: 16px; color: #666; margin-top: 5px;">Status Unavailable</div>
+    </div>
+  {% endif %}
+
+</div>
