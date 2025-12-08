@@ -77,10 +77,13 @@ def parse_events(cal: Calendar, now: datetime) -> List[Dict]:
 def determine_room_status(events: List[Dict], now: datetime) -> Dict:
     """Determine current room status and next booking"""
     
-    # Find current event
+    # Find current event - check if we're within the meeting time
     current_event = None
     for event in events:
-        if event['start'] <= now <= event['end']:
+        # Meeting is current if now is between start and end
+        # Use a small buffer (1 minute) for clock skew
+        start_buffer = event['start'] - timedelta(minutes=1)
+        if start_buffer <= now < event['end']:
             current_event = event
             break
     
@@ -158,6 +161,12 @@ def room_status():
         cal = fetch_ics_feed(ics_url)
         events = parse_events(cal, now)
         
+        # Debug logging
+        app.logger.info(f"Current time: {now}")
+        app.logger.info(f"Found {len(events)} events")
+        for i, event in enumerate(events[:3]):  # Log first 3 events
+            app.logger.info(f"Event {i}: {event['summary']} - {event['start']} to {event['end']}")
+        
         # Determine room status
         status = determine_room_status(events, now)
         
@@ -178,12 +187,49 @@ def room_status():
         return jsonify(response)
     
     except Exception as e:
+        app.logger.error(f"Error: {str(e)}", exc_info=True)
         return jsonify({
             'error': str(e),
             'room_name': room_name,
             'status': 'ERROR',
             'current_time': datetime.now(TIMEZONE).strftime('%-I:%M %p')
         }), 500
+
+
+@app.route('/debug')
+def debug():
+    """Debug endpoint to see parsed events"""
+    ics_url = request.args.get('ics_url')
+    if not ics_url:
+        return jsonify({'error': 'ics_url parameter required'}), 400
+    
+    try:
+        now = datetime.now(TIMEZONE)
+        cal = fetch_ics_feed(ics_url)
+        events = parse_events(cal, now)
+        
+        debug_info = {
+            'current_time': now.isoformat(),
+            'current_time_display': now.strftime('%-I:%M %p'),
+            'timezone': str(TIMEZONE),
+            'events': []
+        }
+        
+        for event in events[:5]:  # Show first 5 events
+            debug_info['events'].append({
+                'summary': event['summary'],
+                'start_iso': event['start'].isoformat(),
+                'start_display': event['start'].strftime('%Y-%m-%d %-I:%M %p'),
+                'end_iso': event['end'].isoformat(),
+                'end_display': event['end'].strftime('%Y-%m-%d %-I:%M %p'),
+                'is_current': event['start'] <= now < event['end'],
+                'is_future': event['start'] > now,
+                'minutes_until': int((event['start'] - now).total_seconds() / 60)
+            })
+        
+        return jsonify(debug_info)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/health')
