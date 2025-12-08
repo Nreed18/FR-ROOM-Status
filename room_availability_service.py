@@ -32,6 +32,10 @@ def parse_events(cal: Calendar, now: datetime) -> List[Dict]:
     """Parse calendar events and return relevant booking information"""
     events = []
     
+    # Get today's date range in local timezone
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
     for component in cal.walk('VEVENT'):
         try:
             # Get event details
@@ -57,8 +61,9 @@ def parse_events(cal: Calendar, now: datetime) -> List[Dict]:
             start = start.astimezone(TIMEZONE)
             end = end.astimezone(TIMEZONE)
             
-            # Only include events from today and future
-            if end >= now:
+            # Only include events that start or overlap with today
+            # Event must start before end of today and end after start of today
+            if start <= today_end and end >= today_start:
                 events.append({
                     'summary': summary,
                     'start': start,
