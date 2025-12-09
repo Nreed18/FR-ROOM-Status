@@ -7,12 +7,14 @@ Now with support for recurring events (RRULE)!
 
 from flask import Flask, jsonify, request
 from icalendar import Calendar
+from icalendar.prop import vRecur
 from datetime import datetime, timedelta, date
 import pytz
 import requests
 from typing import List, Dict, Optional
 import recurring_ical_events
 import os
+from dateutil.rrule import rruleset, rrulestr
 
 app = Flask(__name__)
 
@@ -56,65 +58,130 @@ def parse_events_with_recurrence(
     range_start = TIMEZONE.localize(datetime.combine(start_date, datetime.min.time()))
     range_end = TIMEZONE.localize(datetime.combine(end_date, datetime.max.time()))
 
+    def _normalize_dt(dt_value: object, default_end: bool = False) -> datetime:
+        """Convert ical date/datetime to timezone-aware datetime in the service timezone."""
+        if isinstance(dt_value, datetime):
+            if dt_value.tzinfo is None:
+                return TIMEZONE.localize(dt_value)
+            return dt_value.astimezone(TIMEZONE)
+        if isinstance(dt_value, date):
+            base_dt = datetime.combine(dt_value, datetime.max.time() if default_end else datetime.min.time())
+            return TIMEZONE.localize(base_dt)
+        raise ValueError("Unsupported date value")
+
+    # Build a lookup for exception overrides (RECURRENCE-ID components)
+    overrides: Dict[str, Dict[datetime, object]] = {}
+    for component in cal.walk('VEVENT'):
+        recurrence_id = component.get('RECURRENCE-ID')
+        if recurrence_id:
+            uid = str(component.get('UID'))
+            rec_dt = _normalize_dt(recurrence_id.dt)
+            overrides.setdefault(uid, {})[rec_dt] = component
+
+    def _add_event(component, start_dt: datetime, end_dt: datetime):
+        if start_dt <= range_end and end_dt >= range_start:
+            events.append({
+                'summary': str(component.get('SUMMARY', 'Booking')),
+                'start': start_dt,
+                'end': end_dt,
+                'organizer': str(component.get('ORGANIZER', '')).replace('mailto:', '')
+            })
+
     try:
-        # Expand recurring events in UTC to avoid off-by-one-day issues
-        # when comparing timezone-aware datetimes from different TZ definitions
-        window_start = range_start.astimezone(pytz.UTC)
-        window_end = range_end.astimezone(pytz.UTC)
-
-        # Get all events occurring in the requested range (including recurring instances)
-        # Use timezone-aware datetimes so recurrence expansion respects hours/minutes
-        events_today = recurring_ical_events.of(cal).between(window_start, window_end)
-
-        for component in events_today:
-            try:
-                # Get event details
-                summary = str(component.get('SUMMARY', 'Booking'))
-                start = component.get('DTSTART').dt
-                end = component.get('DTEND').dt
-                
-                # Convert to datetime if date only
-                if isinstance(start, date) and not isinstance(start, datetime):
-                    start = datetime.combine(start, datetime.min.time())
-                    start = TIMEZONE.localize(start)
-                if isinstance(end, date) and not isinstance(end, datetime):
-                    end = datetime.combine(end, datetime.max.time())
-                    end = TIMEZONE.localize(end)
-                
-                # Ensure timezone aware
-                if start.tzinfo is None:
-                    start = TIMEZONE.localize(start)
-                if end.tzinfo is None:
-                    end = TIMEZONE.localize(end)
-                
-                # Convert to local timezone
-                start = start.astimezone(TIMEZONE)
-                end = end.astimezone(TIMEZONE)
-                
-                # Only include events that overlap the requested date range
-                if start <= range_end and end >= range_start:
-                    events.append({
-                        'summary': summary,
-                        'start': start,
-                        'end': end,
-                        'organizer': str(component.get('ORGANIZER', '')).replace('mailto:', '')
-                    })
-            except Exception as e:
-                # Skip problematic events
-                app.logger.warning(f"Error parsing event: {str(e)}")
+        for component in cal.walk('VEVENT'):
+            if component.get('RECURRENCE-ID'):
+                # Handled via overrides when processing the master event
                 continue
+
+            start = component.get('DTSTART')
+            end = component.get('DTEND')
+            if not start or not end:
+                continue
+
+            start_dt = _normalize_dt(start.dt)
+            end_dt = _normalize_dt(end.dt, default_end=True)
+            duration = end_dt - start_dt
+
+            rrule = component.get('RRULE')
+            if not rrule:
+                _add_event(component, start_dt, end_dt)
+                continue
+
+            # Expand recurring instances using dateutil to better handle UNTIL rules in UTC
+            rule_params = dict(component.decoded('RRULE'))
+            rrule_tz = start_dt.tzinfo or TIMEZONE
+            start_for_rrule = start_dt
+
+            # Convert timezone-aware start/UNTIL values to naive datetimes so dateutil keeps wall times across DST
+            if start_dt.tzinfo:
+                start_for_rrule = start_dt.replace(tzinfo=None)
+                if 'UNTIL' in rule_params and rule_params['UNTIL']:
+                    until_dt = rule_params['UNTIL'][0]
+                    if isinstance(until_dt, datetime):
+                        rule_params['UNTIL'] = [until_dt.astimezone(rrule_tz).replace(tzinfo=None)]
+            rule_str = vRecur(rule_params).to_ical().decode()
+            rrule_set = rruleset()
+            rrule_set.rrule(rrulestr(rule_str, dtstart=start_for_rrule))
+
+            # Apply exclusions
+            exdates = component.get('EXDATE') or []
+            if not isinstance(exdates, list):
+                exdates = [exdates]
+            for ex in exdates:
+                for ex_dt in ex.dts:
+                    exdate_dt = _normalize_dt(ex_dt.dt)
+                    if start_dt.tzinfo:
+                        exdate_dt = exdate_dt.replace(tzinfo=None)
+                    rrule_set.exdate(exdate_dt)
+
+            # Apply explicit additional dates
+            rdates = component.get('RDATE') or []
+            if not isinstance(rdates, list):
+                rdates = [rdates]
+            for rdate in rdates:
+                for add_dt in rdate.dts:
+                    rdate_dt = _normalize_dt(add_dt.dt)
+                    if start_dt.tzinfo:
+                        rdate_dt = rdate_dt.replace(tzinfo=None)
+                    rrule_set.rdate(rdate_dt)
+
+            uid = str(component.get('UID'))
+            override_map = overrides.get(uid, {})
+
+            query_start = range_start
+            query_end = range_end
+            if start_dt.tzinfo:
+                query_start = range_start.astimezone(rrule_tz).replace(tzinfo=None)
+                query_end = range_end.astimezone(rrule_tz).replace(tzinfo=None)
+
+            for occurrence in rrule_set.between(query_start, query_end, inc=True):
+                # Use overrides when present
+                occurrence_key = occurrence
+                if start_dt.tzinfo:
+                    occurrence_key = rrule_tz.localize(occurrence)
+                override_component = override_map.get(occurrence_key)
+                if override_component:
+                    if str(override_component.get('STATUS', '')).upper() == 'CANCELLED':
+                        continue
+                    occ_start = _normalize_dt(override_component.get('DTSTART').dt)
+                    occ_end = _normalize_dt(override_component.get('DTEND').dt, default_end=True)
+                    _add_event(override_component, occ_start, occ_end)
+                else:
+                    occ_start = occurrence if not start_dt.tzinfo else rrule_tz.localize(occurrence)
+                    occ_start = occ_start.astimezone(TIMEZONE)
+                    occ_end = occ_start + duration
+                    _add_event(component, occ_start, occ_end)
     except Exception as e:
         app.logger.error(f"Error expanding recurring events: {str(e)}")
-        # Fallback to old method if recurring expansion fails
         return parse_events_fallback(cal, now, start_date=start_date, end_date=end_date)
-    
+
     # Sort by start time
     events.sort(key=lambda x: x['start'])
-    
+
     app.logger.info(f"Found {len(events)} events for today")
     for event in events:
         app.logger.info(f"  - {event['summary']}: {event['start'].strftime('%I:%M %p')} - {event['end'].strftime('%I:%M %p')}")
-    
+
     return events
 
 
