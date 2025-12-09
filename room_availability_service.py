@@ -57,9 +57,14 @@ def parse_events_with_recurrence(
     range_end = TIMEZONE.localize(datetime.combine(end_date, datetime.max.time()))
 
     try:
+        # Expand recurring events in UTC to avoid off-by-one-day issues
+        # when comparing timezone-aware datetimes from different TZ definitions
+        window_start = range_start.astimezone(pytz.UTC)
+        window_end = range_end.astimezone(pytz.UTC)
+
         # Get all events occurring in the requested range (including recurring instances)
         # Use timezone-aware datetimes so recurrence expansion respects hours/minutes
-        events_today = recurring_ical_events.of(cal).between(range_start, range_end)
+        events_today = recurring_ical_events.of(cal).between(window_start, window_end)
 
         for component in events_today:
             try:
