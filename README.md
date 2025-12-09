@@ -133,6 +133,18 @@ Test the endpoint:
 curl "http://your-server:5000/room-status?ics_url=YOUR_ICS_URL&room_name=Conference%20Room%201"
 ```
 
+To fetch multiple calendars in one call, use the multi-feed endpoint. You can repeat
+`ics_url`/`room_name` pairs or provide a comma-separated list of ICS URLs:
+
+```bash
+curl "http://your-server:5000/multi-room-status?ics_url=ETHAN_ICS&ics_url=NICK_ICS&room_name=Ethan&room_name=Nick"
+# or
+curl "http://your-server:5000/multi-room-status?ics_url=ETHAN_ICS,NICK_ICS,TRISTEN_ICS"
+```
+
+Each entry in the `rooms` array mirrors the `/room-status` response so you can easily
+render multiple people or rooms side-by-side.
+
 If you need to inspect how the service expands recurring events, call the debug endpoint. You can optionally pass `days=N` (1–30) to see a wider date range (useful when there are no meetings today):
 ```bash
 curl "http://your-server:5000/debug?ics_url=YOUR_ICS_URL&days=7"

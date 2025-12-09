@@ -317,6 +317,27 @@ def health():
     })
 
 
+def build_room_status_response(ics_url: str, room_name: str, now: datetime) -> Dict:
+    """Fetch calendar data and return a room status payload."""
+    cal = fetch_ics_feed(ics_url)
+    events = parse_events_with_recurrence(cal, now)
+    status = determine_room_status(events, now)
+
+    return {
+        'room_name': room_name,
+        'ics_url': ics_url,
+        'current_time': now.strftime('%-I:%M %p'),
+        'current_date': now.strftime('%A, %B %-d, %Y'),
+        'status': status['status'],
+        'status_text': status['status_text'],
+        'available_until': status['available_until'],
+        'minutes_available': status['minutes_available'],
+        'current_booking': status['current_booking'],
+        'next_booking': status['next_booking'],
+        'last_updated': now.isoformat()
+    }
+
+
 @app.route('/debug')
 def debug():
     """Debug endpoint to see parsed events"""
@@ -376,37 +397,16 @@ def room_status():
     
     ics_url = request.args.get('ics_url')
     room_name = request.args.get('room_name', 'Conference Room')
-    
+
     if not ics_url:
         return jsonify({'error': 'ics_url parameter required'}), 400
-    
+
     try:
         # Get current time in configured timezone
         now = datetime.now(TIMEZONE)
-        
-        # Fetch and parse calendar
-        cal = fetch_ics_feed(ics_url)
-        events = parse_events_with_recurrence(cal, now)
-        
-        # Determine room status
-        status = determine_room_status(events, now)
-        
-        # Build response for TRMNL
-        response = {
-            'room_name': room_name,
-            'current_time': now.strftime('%-I:%M %p'),
-            'current_date': now.strftime('%A, %B %-d, %Y'),
-            'status': status['status'],
-            'status_text': status['status_text'],
-            'available_until': status['available_until'],
-            'minutes_available': status['minutes_available'],
-            'current_booking': status['current_booking'],
-            'next_booking': status['next_booking'],
-            'last_updated': now.isoformat()
-        }
-        
-        return jsonify(response)
-    
+
+        return jsonify(build_room_status_response(ics_url, room_name, now))
+
     except Exception as e:
         app.logger.error(f"Error: {str(e)}", exc_info=True)
         return jsonify({
@@ -415,6 +415,51 @@ def room_status():
             'status': 'ERROR',
             'current_time': datetime.now(TIMEZONE).strftime('%-I:%M %p')
         }), 500
+
+
+@app.route('/multi-room-status')
+def multi_room_status():
+    """
+    Endpoint to fetch multiple ICS feeds in a single request.
+
+    Accepts repeated `ics_url` and `room_name` query parameters. Room names
+    align with ICS URLs by index; missing names fall back to "Schedule N".
+    You can also pass a single comma-separated `ics_url` value for convenience.
+    """
+
+    ics_urls = request.args.getlist('ics_url')
+    room_names = request.args.getlist('room_name')
+
+    if len(ics_urls) == 1 and ',' in ics_urls[0]:
+        ics_urls = [u.strip() for u in ics_urls[0].split(',') if u.strip()]
+
+    if not ics_urls:
+        return jsonify({'error': 'at least one ics_url parameter is required'}), 400
+
+    now = datetime.now(TIMEZONE)
+    results = []
+    errors = []
+
+    for index, ics_url in enumerate(ics_urls):
+        room_name = room_names[index] if index < len(room_names) and room_names[index] else f"Schedule {index + 1}"
+        try:
+            results.append(build_room_status_response(ics_url, room_name, now))
+        except Exception as e:
+            app.logger.error(f"Error processing ICS feed {ics_url}: {str(e)}", exc_info=True)
+            errors.append({'ics_url': ics_url, 'room_name': room_name, 'error': str(e)})
+
+    if not results:
+        return jsonify({'error': 'No calendars could be processed', 'details': errors}), 500
+
+    response = {
+        'generated_at': now.isoformat(),
+        'timezone': str(TIMEZONE),
+        'rooms': results,
+    }
+    if errors:
+        response['errors'] = errors
+
+    return jsonify(response)
 
 
 if __name__ == '__main__':
